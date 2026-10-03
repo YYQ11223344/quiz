@@ -238,10 +238,19 @@ async function syncUp() {
 }
 async function syncDown() {
   if (!syncCfg) return null;
+  let id = syncCfg.gistId;
+  if (!id) {
+    const found = await findSyncGist();
+    if (!found) return null;
+    id = found.id;
+  }
   let g = null;
-  if (syncCfg.gistId) { try { g = await ghApi("/gists/" + syncCfg.gistId); } catch (e) { g = null; } }
-  if (!g) g = await findSyncGist();
-  if (!g) return null;
+  try { g = await ghApi("/gists/" + id); } catch (e) { g = null; }
+  if (!g) { // gist 可能已被删除, 重新查找
+    const found = await findSyncGist();
+    if (!found) return null;
+    g = await ghApi("/gists/" + found.id);
+  }
   syncCfg.gistId = g.id; store.set("sync", syncCfg);
   const f = g.files[SYNC_FILE];
   if (!f) return null;
