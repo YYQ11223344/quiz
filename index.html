@@ -474,6 +474,7 @@ function startPractice(qs, mode, bankKey, special) {
 function renderQuiz() {
   const q = S.list[S.idx];
   const answered = S.answers[q.id];
+  curSel = answered ? answered.sel.slice() : []; // 进入题目时初始化选择
   const typeTag = `<span class="tag ${q.type}">${TYPE_NAME[q.type]}</span>`;
   const isFav = !!favSet[q.id];
   const doneCount = Object.keys(S.answers).length;
@@ -518,7 +519,7 @@ function mainBtnText() {
 
 let curSel = [];
 function renderOpts(q, answered) {
-  curSel = answered ? answered.sel.slice() : [];
+  if (answered) curSel = answered.sel.slice();
   const box = document.getElementById("opts");
   box.innerHTML = q.opts.map((o, i) => {
     const L = LETTERS[i];
