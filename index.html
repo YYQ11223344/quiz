@@ -169,6 +169,12 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 .toast { position: fixed; left: 50%; bottom: 90px; transform: translateX(-50%); background: rgba(15,23,42,.9);
   color: #fff; padding: 10px 20px; border-radius: 24px; font-size: 14px; z-index: 300; animation: fadeup .2s; }
 @keyframes fadeup { from { opacity: 0; transform: translate(-50%, 10px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.token-input { width: 100%; padding: 12px 14px; border: 1.5px solid var(--border); border-radius: 10px;
+  font-size: 14px; font-family: monospace; margin: 10px 0; }
+.token-input:focus { outline: none; border-color: var(--primary); }
+.sync-status { font-size: 12px; color: var(--text2); padding: 8px 12px; background: var(--bg);
+  border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
+.sync-status b { color: var(--green); }
 </style>
 </head>
 <body>
@@ -189,6 +195,153 @@ let progress = store.get("progress", {});   // {qid: 'r'|'w'}
 let wrongSet = store.get("wrong", {});      // {qid: true}
 let favSet = store.get("fav", {});          // {qid: true}
 let lastPos = store.get("lastpos", {});     // {bankKey: index}
+let localStamp = store.get("stamp", 0);     // 本地数据最后修改时间
+
+/* ================= 云同步模块（GitHub Gist 存储） ================= */
+const SYNC_DESC = "机械安全员刷题宝-同步数据";
+const SYNC_FILE = "quiz-sync.json";
+let syncCfg = store.get("sync", null);      // {token, user, gistId}
+let syncTimer = null, syncing = false;
+
+async function ghApi(path, opts = {}) {
+  const r = await fetch("https://api.github.com" + path, {
+    ...opts,
+    headers: { "Authorization": "token " + syncCfg.token,
+      "Accept": "application/vnd.github+json", "Content-Type": "application/json" }
+  });
+  if (!r.ok) { const e = new Error("HTTP " + r.status); e.status = r.status; throw e; }
+  return r.json();
+}
+function packLocal() {
+  return { v: 1, updatedAt: localStamp, device: /Mobile/.test(navigator.userAgent) ? "手机" : "电脑",
+    data: { progress, wrong: wrongSet, fav: favSet, lastpos: lastPos } };
+}
+async function findSyncGist() {
+  const gists = await ghApi("/gists?per_page=100");
+  return gists.find(g => g.description === SYNC_DESC);
+}
+async function syncUp() {
+  if (!syncCfg) return;
+  const body = { description: SYNC_DESC, public: false,
+    files: { [SYNC_FILE]: { content: JSON.stringify(packLocal()) } } };
+  if (!syncCfg.gistId) {
+    const g = await findSyncGist();
+    if (g) syncCfg.gistId = g.id;
+  }
+  if (syncCfg.gistId) {
+    await ghApi("/gists/" + syncCfg.gistId, { method: "PATCH", body: JSON.stringify(body) });
+  } else {
+    const ng = await ghApi("/gists", { method: "POST", body: JSON.stringify(body) });
+    syncCfg.gistId = ng.id;
+  }
+  store.set("sync", syncCfg);
+}
+async function syncDown() {
+  if (!syncCfg) return null;
+  let g = null;
+  if (syncCfg.gistId) { try { g = await ghApi("/gists/" + syncCfg.gistId); } catch (e) { g = null; } }
+  if (!g) g = await findSyncGist();
+  if (!g) return null;
+  syncCfg.gistId = g.id; store.set("sync", syncCfg);
+  const f = g.files[SYNC_FILE];
+  if (!f) return null;
+  const text = f.truncated ? await (await fetch(f.raw_url)).text() : f.content;
+  return JSON.parse(text);
+}
+function applyCloud(cloud) {
+  progress = cloud.data.progress || {};
+  wrongSet = cloud.data.wrong || {};
+  favSet = cloud.data.fav || {};
+  lastPos = cloud.data.lastpos || {};
+  localStamp = cloud.updatedAt;
+  store.set("progress", progress); store.set("wrong", wrongSet);
+  store.set("fav", favSet); store.set("lastpos", lastPos); store.set("stamp", localStamp);
+}
+/* 一键同步：云端较新则拉取覆盖本地，否则上传本地到云端 */
+async function syncNow(manual) {
+  if (!syncCfg || syncing) return;
+  syncing = true;
+  updateSyncBadge("syncing");
+  try {
+    const cloud = await syncDown();
+    if (cloud && cloud.updatedAt > localStamp) {
+      applyCloud(cloud);
+      if (manual) toast("已拉取云端最新进度 ✓");
+    } else {
+      await syncUp();
+      if (manual) toast("已上传到云端 ✓");
+    }
+    store.set("syncTime", Date.now());
+    updateSyncBadge("ok");
+  } catch (e) {
+    updateSyncBadge("fail");
+    if (manual) toast(e.status === 401 ? "令牌无效，请重新登录" : "同步失败，请检查网络");
+    if (e.status === 401) { syncCfg = null; store.set("sync", null); }
+  }
+  syncing = false;
+}
+/* 数据变更时调用：记录时间戳并调度自动上传 */
+function markDirty() {
+  localStamp = Date.now();
+  store.set("stamp", localStamp);
+  if (!syncCfg) return;
+  clearTimeout(syncTimer);
+  syncTimer = setTimeout(() => syncNow(false), 3000);
+}
+function updateSyncBadge(st) {
+  const el = document.getElementById("syncBadge");
+  if (!el) return;
+  const map = { ok: ["☁️", "已同步"], syncing: ["🔄", "同步中…"], fail: ["⚠️", "同步失败"], off: ["☁️", "未登录"] };
+  const [ic, txt] = map[st] || map.off;
+  el.innerHTML = `${ic} ${txt}`;
+}
+/* 同步设置面板 */
+function openSyncPanel() {
+  if (syncCfg) {
+    const t = store.get("syncTime", 0);
+    const tstr = t ? new Date(t).toLocaleString("zh-CN") : "从未";
+    overlay.innerHTML = `<div class="modal-mask" onclick="if(event.target===this)closeModal()">
+      <div class="modal"><h3>☁️ 云同步</h3>
+      <div class="sync-status">账号：<b>${esc(syncCfg.user)}</b><br>上次同步：${tstr}</div>
+      <div class="mode-list">
+        <button onclick="closeModal();syncNow(true)"><b>立即同步</b><span>与云端互相比对，取最新进度</span></button>
+        <button onclick="syncLogout()"><b>退出登录</b><span>停止同步，本地进度保留在本设备</span></button>
+      </div>
+      <button class="btn" onclick="closeModal()">关闭</button></div></div>`;
+  } else {
+    overlay.innerHTML = `<div class="modal-mask" onclick="if(event.target===this)closeModal()">
+      <div class="modal"><h3>☁️ 开启云同步</h3>
+      <p class="desc">用你的 GitHub 账号在多设备间同步刷题进度、错题与收藏（数据保存在你自己账号的私密 Gist 中，免费且只有你能访问）。</p>
+      <p class="desc" style="margin-bottom:4px">👉 <a href="https://github.com/settings/tokens/new" target="_blank" style="color:var(--blue)">点我生成令牌</a>：Note 填 quiz-sync，勾选 <b>gist</b> 权限，生成后粘贴到下面：</p>
+      <input class="token-input" id="tokenInput" type="password" placeholder="粘贴 ghp_ 开头的令牌">
+      <div class="mode-list"><button onclick="syncLogin()"><b>登录并开启同步</b><span>令牌仅保存在本设备浏览器中</span></button></div>
+      <button class="btn" onclick="closeModal()">取消</button></div></div>`;
+  }
+}
+async function syncLogin() {
+  const token = document.getElementById("tokenInput").value.trim();
+  if (!token) { toast("请粘贴令牌"); return; }
+  syncCfg = { token, user: "" };
+  try {
+    toast("验证中…");
+    const me = await ghApi("/user");
+    try { await ghApi("/gists?per_page=1"); } catch (e2) { throw Object.assign(new Error("no gist"), { gist: true }); }
+    syncCfg.user = me.login;
+    store.set("sync", syncCfg);
+    closeModal();
+    toast(`欢迎，${me.login}！正在同步…`);
+    await syncNow(true);
+    renderHome();
+  } catch (e) {
+    syncCfg = null;
+    toast("令牌无效或未勾选 gist 权限");
+  }
+}
+function syncLogout() {
+  syncCfg = null; store.set("sync", null);
+  closeModal(); renderHome();
+  toast("已退出云同步");
+}
 
 const byId = {}; DATA.forEach(q => byId[q.id] = q);
 const BANKS = [];
@@ -238,7 +391,8 @@ function renderHome() {
   }).join("");
 
   app.innerHTML = `
-  <div class="topbar"><h1>🦺 机械安全员考核刷题宝</h1></div>
+  <div class="topbar"><h1>🦺 机械安全员考核刷题宝</h1>
+  <div class="actions"><button onclick="openSyncPanel()" id="syncBadge" style="width:auto;padding:0 10px;font-size:13px;border-radius:18px;background:rgba(255,255,255,.15)">☁️ ${syncCfg ? "已登录" : "未登录"}</button></div></div>
   <div class="wrap">
     <div class="hero">
       <h2>机械类专职安全员安全生产知识考核</h2>
@@ -399,6 +553,7 @@ function submitAnswer() {
   if (ok) { delete wrongSet[q.id]; } else { wrongSet[q.id] = true; }
   store.set("wrong", wrongSet);
   if (S.bankKey !== "ALL" && !S.special) { lastPos[S.bankKey] = S.idx; store.set("lastpos", lastPos); }
+  markDirty();
   renderOpts(q, S.answers[q.id]);
   showResult(q, S.answers[q.id], true);
   document.getElementById("mainBtn").textContent = mainBtnText();
@@ -428,7 +583,7 @@ function goNext() {
 function toggleFav() {
   const q = S.list[S.idx];
   if (favSet[q.id]) { delete favSet[q.id]; toast("已取消收藏"); } else { favSet[q.id] = true; toast("已收藏 ★"); }
-  store.set("fav", favSet);
+  store.set("fav", favSet); markDirty();
   const btn = document.querySelector(".topbar .actions button:last-child");
   if (btn) btn.textContent = favSet[q.id] ? "★" : "☆";
 }
@@ -564,7 +719,7 @@ function submitExam() {
     if (ok) { score += pts; detail[q.type][0]++; progress[q.id] = "r"; delete wrongSet[q.id]; }
     else { wrongList.push({ q, sel }); progress[q.id] = "w"; wrongSet[q.id] = true; }
   });
-  store.set("progress", progress); store.set("wrong", wrongSet);
+  store.set("progress", progress); store.set("wrong", wrongSet); markDirty();
   const pass = score >= 60;
   app.innerHTML = `
   <div class="topbar"><button class="back" onclick="renderHome()">‹</button><h1>考试结果</h1></div>
@@ -596,7 +751,14 @@ function submitExam() {
   window.scrollTo(0, 0);
 }
 
-renderHome();
+/* 启动：已登录则先自动同步云端进度，再渲染首页 */
+(async function init() {
+  renderHome();
+  if (syncCfg) {
+    await syncNow(false);
+    renderHome(); // 同步完成后刷新进度展示
+  }
+})();
 </script>
 </body>
 </html>
