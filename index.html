@@ -453,6 +453,7 @@ function renderHome() {
         <div class="stat"><b>${wrongN}</b><span>错题</span></div>
         <div class="stat"><b>${favN}</b><span>收藏</span></div>
       </div>
+      ${done ? `<div style="text-align:center;margin-top:12px"><button onclick="confirmReset('ALL')" style="font-size:12px;color:rgba(255,255,255,.9);background:rgba(255,255,255,.15);padding:6px 16px;border-radius:16px">🗑 重置全部进度</button></div>` : ""}
     </div>
     <div class="quick">
       <button onclick="startExam()"><span class="ic">📝</span><span class="lb">模拟考试</span><span class="cnt">100分制</span></button>
@@ -472,11 +473,34 @@ function openBank(name) {
   const b = BANKS.find(x => x.name === name);
   const qs = name === "ALL" ? DATA : b.qs;
   const undone = qs.filter(q => !progress[q.id]).length;
-  showModal(`《${name === "ALL" ? "全部题库" : name}》`, `共 ${qs.length} 题，其中未练习 ${undone} 题`, [
+  const modes = [
     { t: "顺序练习", d: "按题目顺序逐题练习，自动记忆进度", fn: () => startPractice(qs, "seq", name) },
     { t: "随机练习", d: "随机打乱题目顺序", fn: () => startPractice(qs, "rand", name) },
     { t: "未做题优先", d: "优先练习尚未做过的题目", fn: () => startPractice(qs, "undone", name) },
+  ];
+  if (undone < qs.length) modes.push({ t: "🗑 重置进度", d: "清除本题库的练习完成记录", fn: () => confirmReset(name) });
+  showModal(`《${name === "ALL" ? "全部题库" : name}》`, `共 ${qs.length} 题，其中未练习 ${undone} 题`, modes);
+}
+/* ================= 进度重置 ================= */
+function confirmReset(name) {
+  const qs = name === "ALL" ? DATA : BANKS.find(x => x.name === name).qs;
+  const done = qs.filter(q => progress[q.id]).length;
+  const wrong = qs.filter(q => wrongSet[q.id]).length;
+  if (!done) { toast("还没有练习记录，无需重置"); return; }
+  const label = name === "ALL" ? "全部题库" : name;
+  showModal("重置进度确认", `《${label}》已练习 ${done} 题（含错题 ${wrong} 题），清除后不可恢复`, [
+    { t: "仅重置练习进度", d: "清空完成度，错题本中的题目保留", fn: () => doReset(name, false) },
+    { t: "进度 + 错题全部清空", d: "练习记录与相关错题一并清除", fn: () => doReset(name, true) },
   ]);
+}
+function doReset(name, withWrong) {
+  const qs = name === "ALL" ? DATA : BANKS.find(x => x.name === name).qs;
+  qs.forEach(q => { delete progress[q.id]; if (withWrong) delete wrongSet[q.id]; });
+  if (name === "ALL") lastPos = {}; else delete lastPos[name];
+  store.set("progress", progress); store.set("wrong", wrongSet); store.set("lastpos", lastPos);
+  markDirty(); // 自动同步到云端
+  renderHome();
+  toast("已重置 ✓");
 }
 function openSpecial(kind) {
   const ids = Object.keys(kind === "wrong" ? wrongSet : favSet).map(Number);
