@@ -175,32 +175,80 @@ button { font-family: inherit; cursor: pointer; border: none; background: none; 
 .sync-status { font-size: 12px; color: var(--text2); padding: 8px 12px; background: var(--bg);
   border-radius: 8px; margin-bottom: 12px; line-height: 1.6; }
 .sync-status b { color: var(--green); }
+/* ===== 密码门 ===== */
+.gate { min-height: 100vh; display: flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, #1e293b 0%, #334155 60%, #f97316 130%); padding: 20px; }
+.gate-card { background: #fff; border-radius: 20px; padding: 36px 28px; width: 100%; max-width: 360px;
+  text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.gate-logo { font-size: 52px; margin-bottom: 8px; }
+.gate-card h2 { font-size: 19px; margin-bottom: 6px; }
+.gate-card p { font-size: 13px; color: var(--text2); margin-bottom: 18px; }
+.gate-card input { width: 100%; padding: 13px 16px; border: 1.5px solid var(--border); border-radius: 12px;
+  font-size: 17px; text-align: center; letter-spacing: 4px; margin-bottom: 12px; }
+.gate-card input:focus { outline: none; border-color: var(--primary); }
+.gate-err { display: none; margin-top: 12px; font-size: 13px; color: var(--red); }
+.gate-err.show { display: block; animation: shake .4s; }
+@keyframes shake { 0%,100%{transform:translateX(0)} 25%{transform:translateX(-8px)} 75%{transform:translateX(8px)} }
 </style>
 </head>
 <body>
 <div id="app"></div>
 <div id="overlay"></div>
-<script src="data.js"></script>
 <script>
 "use strict";
-/* ================= 数据与存储 ================= */
-const DATA = window.QUIZ_DATA;
-const TYPE_NAME = { single: "单选题", multiple: "多选题", judge: "判断题" };
-const LETTERS = "ABCDE";
+/* ================= 密码门（验证通过前不加载题库数据） ================= */
+const PASS_HASH = "c41269a9e57928f00d17fb54a1e008093e0a28951a65b3e54cbaaf87844adf4f";
 const store = {
   get(k, d) { try { const v = localStorage.getItem("mq_" + k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { localStorage.setItem("mq_" + k, JSON.stringify(v)); }
 };
-let progress = store.get("progress", {});   // {qid: 'r'|'w'}
-let wrongSet = store.get("wrong", {});      // {qid: true}
-let favSet = store.get("fav", {});          // {qid: true}
-let lastPos = store.get("lastpos", {});     // {bankKey: index}
-let localStamp = store.get("stamp", 0);     // 本地数据最后修改时间
+async function sha256(s) {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, "0")).join("");
+}
+function renderGate() {
+  document.getElementById("app").innerHTML = `
+  <div class="gate"><div class="gate-card">
+    <div class="gate-logo">🦺</div>
+    <h2>机械安全员考核刷题宝</h2>
+    <p>本站已启用访问保护，请输入访问密码</p>
+    <input type="password" id="gateInput" placeholder="请输入密码" maxlength="20" autocomplete="off">
+    <button class="btn primary" style="width:100%" onclick="tryGate()">进入题库</button>
+    <div class="gate-err" id="gateErr">密码错误，请重试</div>
+  </div></div>`;
+  const inp = document.getElementById("gateInput");
+  inp.focus();
+  inp.addEventListener("keydown", e => { if (e.key === "Enter") tryGate(); });
+}
+async function tryGate() {
+  const v = document.getElementById("gateInput").value.trim();
+  if (!v) return;
+  let ok = false;
+  try { ok = (await sha256(v)) === PASS_HASH; } catch (e) { ok = v === atob("RERFR1M="); }
+  if (ok) { store.set("auth", PASS_HASH); loadApp(); }
+  else {
+    const err = document.getElementById("gateErr");
+    err.classList.remove("show"); void err.offsetWidth; err.classList.add("show");
+    document.getElementById("gateInput").value = "";
+  }
+}
+function loadApp() {
+  const s = document.createElement("script");
+  s.src = "data.js";
+  s.onload = boot;
+  s.onerror = () => alert("题库数据加载失败，请检查网络后刷新");
+  document.head.appendChild(s);
+}
+/* ================= 数据与存储 ================= */
+let DATA;
+const TYPE_NAME = { single: "单选题", multiple: "多选题", judge: "判断题" };
+const LETTERS = "ABCDE";
+let progress, wrongSet, favSet, lastPos, localStamp;
 
 /* ================= 云同步模块（GitHub Gist 存储） ================= */
 const SYNC_DESC = "机械安全员刷题宝-同步数据";
 const SYNC_FILE = "quiz-sync.json";
-let syncCfg = store.get("sync", null);      // {token, user, gistId}
+let syncCfg = null;                         // boot() 时从本地恢复
 let syncTimer = null, syncing = false;
 
 async function ghApi(path, opts = {}) {
@@ -352,15 +400,8 @@ function syncLogout() {
   toast("已退出云同步");
 }
 
-const byId = {}; DATA.forEach(q => byId[q.id] = q);
+const byId = {};
 const BANKS = [];
-DATA.forEach(q => {
-  let b = BANKS.find(x => x.name === q.bank);
-  if (!b) { b = { name: q.bank, cat: q.cat, qs: [] }; BANKS.push(b); }
-  b.qs.push(q);
-});
-// 题库排序: 理论题库在前
-BANKS.sort((a, b) => (a.cat === b.cat ? 0 : a.cat === "理论题库" ? -1 : 1));
 
 /* ================= 全局状态 ================= */
 const app = document.getElementById("app");
@@ -419,10 +460,9 @@ function renderHome() {
       <button onclick="openSpecial('fav')"><span class="ic">⭐</span><span class="lb">收藏夹</span><span class="cnt">${favN} 题</span></button>
       <button onclick="openBank('ALL')"><span class="ic">📚</span><span class="lb">全部题库</span><span class="cnt">${total} 题</span></button>
     </div>
-    <div class="sec-title">理论题库</div>
-    <div class="bank-grid">${bankCards("理论题库")}</div>
-    <div class="sec-title">实操识图题库（看图识隐患）</div>
-    <div class="bank-grid">${bankCards("实操识图题库")}</div>
+    ${[...new Set(BANKS.map(b => b.cat))].map(cat => `
+      <div class="sec-title">${esc(cat)}${cat.includes("识图") ? "（看图识隐患）" : ""}</div>
+      <div class="bank-grid">${bankCards(cat)}</div>`).join("")}
     <p style="text-align:center;font-size:12px;color:var(--text2);margin-top:24px">练习进度自动保存在本机浏览器</p>
   </div>`;
 }
@@ -761,14 +801,31 @@ function submitExam() {
   window.scrollTo(0, 0);
 }
 
-/* 启动：已登录则先自动同步云端进度，再渲染首页 */
-(async function init() {
+/* 启动：密码验证通过 → 加载 data.js → boot 初始化 */
+async function boot() {
+  DATA = window.QUIZ_DATA;
+  progress = store.get("progress", {});
+  wrongSet = store.get("wrong", {});
+  favSet = store.get("fav", {});
+  lastPos = store.get("lastpos", {});
+  localStamp = store.get("stamp", 0);
+  syncCfg = store.get("sync", null);
+  DATA.forEach(q => {
+    byId[q.id] = q;
+    let b = BANKS.find(x => x.name === q.bank);
+    if (!b) { b = { name: q.bank, cat: q.cat, qs: [] }; BANKS.push(b); }
+    b.qs.push(q);
+  });
+  BANKS.sort((a, b) => (a.cat === b.cat ? 0 : a.cat === "理论题库" ? -1 : 1));
   renderHome();
   if (syncCfg) {
     await syncNow(false);
     if (!S) renderHome(); // 同步完成后刷新进度展示(避免冲掉答题页)
   }
-})();
+}
+/* 入口：已验证过密码则直接进应用，否则显示密码门 */
+if (store.get("auth") === PASS_HASH) loadApp();
+else renderGate();
 </script>
 </body>
 </html>
